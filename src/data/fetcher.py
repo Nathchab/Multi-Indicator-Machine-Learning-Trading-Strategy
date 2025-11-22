@@ -167,9 +167,19 @@ def get_vix(start: str, end: str, use_cache: bool = True)-> pd.Series:
         pd.Series with date index
     """
     data = get_single_ticker("^VIX", start, end, use_cache=use_cache)
-    return data["close"].rename("VIX")
+    
+    if isinstance(data, pd.DataFrame):
+        if "close" in data.columns:
+            vix_series = data["close"]
+        else:
+            vix_series = data.iloc[:, 0]
+    else:
+        vix_series = data
+    
+    vix_series.name = "vix"
+    return vix_series
 
-def get_risk_free_rate(start: str, end: str, use_cache: bool = True) ->pd.Series:
+def get_risk_free_rate(start: str, end: str, use_cache: bool = True) -> pd.Series:
     """
     Get risk-free rate data (13 week Treasury bill rate).
 
@@ -177,7 +187,19 @@ def get_risk_free_rate(start: str, end: str, use_cache: bool = True) ->pd.Series
         pd.Series with date index (annualized rate in decimal form)
     """
     data = get_single_ticker("^IRX", start, end, use_cache=use_cache)
-    return (data["close"] / 100).rename("rf")
+
+    if isinstance(data, pd.DataFrame):
+        if 'close' in data.columns:
+            rf_series = data["close"]
+        else:
+            rf_series = data.iloc[:, 0]
+    else:
+        rf_series = data
+    
+    rf_series = rf_series / 100
+    rf_series.name = "rf"
+    
+    return rf_series
 
 def get_market_data(
     tickers: Iterable[str],
