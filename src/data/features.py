@@ -53,7 +53,7 @@ class FeatureEngineer:
         return df
 
     def add_volatility(
-        self, 
+        self,
         df: pd.DataFrame,
         window: int = 20
     ) -> pd.DataFrame:
