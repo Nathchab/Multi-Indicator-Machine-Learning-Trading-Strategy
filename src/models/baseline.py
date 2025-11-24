@@ -39,16 +39,19 @@ class OLSModel:
         Fit the OLS model
         """
         self.features_names = X.columns.tolist()
+        X_work = X.copy()
+
         if standardize:
-            self.X_train_mean = X.mean()
-            self.X_train_std = X.std()
-            X = (X - self.X_train_mean) / self.X_train_std
+            self.X_train_mean = X_work.mean()
+            self.X_train_std = X_work.std()
+            X_work = (X_work - self.X_train_mean) / self.X_train_std
         else:
-            X_transformed = X.copy()
+            self.X_train_mean = None
+            self.X_train_std = None
         
         if add_constant:
-            X_transformed = sm.add_constant(X_transformed)
-        self.model = sm.OLS(y, X_transformed, missing='drop')
+            X_work = sm.add_constant(X_work)
+        self.model = sm.OLS(y, X_work, missing='drop')
 
         if self.use_hac:
             with warnings.catch_warnings():
