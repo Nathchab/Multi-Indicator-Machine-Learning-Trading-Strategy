@@ -52,27 +52,39 @@ def load_data(start : str, end : str) -> Tuple[pd.DataFrame, pd.Series, pd.Serie
 
     X, y_reg, y_clf = prepare_model_data(features_df, fe, dropna=True)
 
-    common_idx = X.index.intersection(y_reg.index)
+    common_idx = X.index.intersection(y_reg.index).intersection(y_clf.index)
     X = X.loc[common_idx]
     y_reg = y_reg.loc[common_idx]
+    y_clf = y_clf.loc[common_idx]
 
     print(f"\nModel data prepared:")
     print(f"- Features shape: {X.shape}")
     print(f"- Target shape: {y_reg.shape}")
     print(f"- Index match: {X.index.equals(y_reg.index)}")
     
-    return features_df, X, y_reg
+    return features_df, X, y_reg, y_clf
 
 def train_test_split_by_date(
-    X: pd.DataFrame, y : pd.Series, split_date : str
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+    X: pd.DataFrame,
+    y_reg : pd.Series,
+    y_clf: pd.Series,
+    split_date : str
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series]:
     #split data by date (respects temporal ordering)
     print("\n3) Train / test split...")
 
-    X_train = X[X.index < split_date]
-    y_train = y[y.index < split_date]
-    X_test = X[X.index >= split_date]
-    y_test = y[y.index >= split_date]
+    assert X.index.equals(y_reg.index) and X.index.equals(y_clf.index)
+
+    train_mask = X.index < split_date
+    test_mask = X.index >= split_date
+    
+    X_train = X.loc[train_mask]
+    y_train_reg = y_reg.loc[train_mask]
+    y_train_clf = y_clf.loc[train_mask]
+    
+    X_test = X.loc[test_mask]
+    y_test_reg = y_reg.loc[test_mask]
+    y_test_clf = y_clf.loc[test_mask]
 
     print(f"Train period: {X_train.index[0].date()} to {X_train.index[-1].date()}")
     print(f"- Observations: {len(X_train)}")
@@ -80,10 +92,12 @@ def train_test_split_by_date(
     print(f"- Observations: {len(X_test)}")
     print(f"Train/test ratio: {len(X_train) / (len(X_train) + len(X_test)) * 100:.1f}% / {len(X_test) / (len(X_train) + len(X_test)) * 100:.1f}%")
     
-    return X_train, X_test, y_train, y_test
+    return X_train, X_test, y_train_reg, y_test_reg, y_train_clf, y_test_clf
 
 def train_models(
-    X_train : pd.DataFrame, y_train : pd.Series
+    X_train : pd.DataFrame, 
+    y_train_reg : pd.Series,
+    y_train_clf: pd.Series
 ) -> Dict[str, object]:
     #train all models
     print("\n4) Training models...")
@@ -92,13 +106,14 @@ def train_models(
     print("Training OLS...")
     try:
         ols = OLSModel(use_hac=True, maxlags=5)
-        ols.fit(X_train, y_train)
+        try:
+            ols.fit(X_train, y_train_reg)
+        except TypeError:
+            ols.fit(X_train, y_train_reg, add_constant=True, standardize=True)
         models["OLS"] = ols
         print("OLS trained")
     except Exception as e:
         print(f"OLS training failed: {e}")
-        import traceback
-        traceback.print_exc()
 
     #random forest
     print("Training random forest")
@@ -108,7 +123,7 @@ def train_models(
         min_samples_leaf=5,
         random_state=42
     )
-    rf.fit(X_train, y_train)
+    rf.fit(X_train, y_train_reg)
     models["Random Forest"] = rf
     print("Random Forest trained")
     
@@ -123,7 +138,7 @@ def train_models(
             colsample_bytree=0.8,
             random_state=42
         )
-        xgb.fit(X_train, y_train)
+        xgb.fit(X_train, y_train_reg)
         models["XGBoost"] = xgb
         print("XGBoost trained")
     except ImportError:
@@ -140,7 +155,7 @@ def train_models(
             colsample_bytree=0.8,
             random_state=42
         )
-        lgbm.fit(X_train, y_train)
+        lgbm.fit(X_train, y_train_reg)
         models["LightGBM"] = lgbm
         print("LightGBM trained")
     except ImportError:
@@ -207,24 +222,83 @@ def make_predictions(
     return results
 
 def predictions_to_signals(
-    predictions : pd.Series, threshold: float = 0.7
+    predictions : pd.Series, threshold_quantile: float = 0.7
 )-> pd.Series:
 
-    threshold_value = predictions.quantile(threshold)
+    threshold_value = predictions.quantile(threshold_quantile)
     signals = pd.Series(0, index=predictions.index, name="signal")
     signals[predictions > threshold_value] = 1
     return signals
 
+def optimize_threshold(
+    y_test: pd.Series, 
+    model_results: Dict[str, Dict[str, object]], 
+    thresholds: list = [0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
+    ) -> Tuple[float, pd.DataFrame]:
+    """Test multiple thresholds and find best Sharpe."""
+    print("\n" + "="*80)
+    print("Thresold optimization")
+    print("="*80)
+    
+    best_sharpe = -np.inf
+    best_threshold = None
+    results = []
+    
+    for threshold in thresholds:
+        print(f"\nTesting threshold = {threshold:.0%}...")
+        perf_df = backtest_all_strategies(y_test, model_results, signal_threshold=threshold)   
+        
+        #best model's Sharpe
+        ml_models = perf_df.drop("Buy & Hold", errors='ignore')
+        if len(ml_models) > 0:
+            sharpe_series = ml_models["Sharpe Ratio"].dropna()
+            if len(sharpe_series) == 0:
+                continue
+            best_model = sharpe_series.idxmax()
+            sharpe = ml_models.loc[best_model, "Sharpe Ratio"] if "Sharpe Ratio" in ml_models.columns else ml_models.loc[best_model, "Sharpe"]
+            time_in_market = ml_models.loc[best_model, "Time in Market (%)"]
+            
+            print(f"  Best model: {best_model}")
+            print(f"  Sharpe: {sharpe:.3f}")
+            print(f"  Time in Market: {time_in_market:.1f}%")
+            
+            results.append({
+                "Threshold": threshold,
+                "Best Model": best_model,
+                "Sharpe": sharpe,
+                "Time in Market (%)": time_in_market
+            })
+            
+            if sharpe > best_sharpe:
+                best_sharpe = sharpe
+                best_threshold = threshold
+    
+    results_df = pd.DataFrame(results)
+    print("\n" + "="*80)
+    print("Threshold optimization")
+    print("="*80)
+    print(results_df.round(3))
+    if best_threshold is None:
+        print("\nNo valid threshold found, using default 0.70")
+        best_threshold = 0.70
+    else:
+        print(f"\nBest threshold: {best_threshold:.0%} (Sharpe = {best_sharpe:.3f})")
+
+    return best_threshold, results_df
+
 def backtest_all_strategies(
-    y_test : pd.Series, model_results: Dict[str, Dict[str, object]]
+    y_test : pd.Series, model_results: Dict[str, Dict[str, object]],
+    signal_threshold: float = 0.7
 )-> pd.DataFrame:
     print("\n6) Backtesting all strategies (with transaction costs)...")
+
     performance_summary: Dict[str, Dict[str, float]] = {}
+
     for name, res in model_results.items():
         print(f"\nBacktesting {name}...")
         pred = res["pred"]
 
-        signals = predictions_to_signals(pred, threshold=0.70)
+        signals = predictions_to_signals(pred, threshold_quantile=signal_threshold) #change the time in the market to see if it changes the perfomance 
 
         bt = backtest_signals(
             returns=y_test,
@@ -259,9 +333,9 @@ def backtest_all_strategies(
 
         performance_summary[name] = {
             "Total Return (%)": total_return,
-            "Sharpe": sharpe,
+            "Sharpe Ratio": sharpe,
             "Max Drawdown (%)": max_dd,
-            "Time in Market (%)": time_in_mkt,
+            "Win Rate (%)": win_rate,
             "Num Trades": num_trades,
             "Time in Market (%)": time_in_mkt,
             "IC (test)": res["ic"],
@@ -314,21 +388,37 @@ def main()-> None:
     print("- Transaction costs: 1 basis point")
 
     # Load data
-    features_df, X, y = load_data(start="2015-01-01", end="2024-01-01")
+    features_df, X, y_reg, y_clf = load_data(
+        start="2015-01-01", 
+        end="2024-01-01"
+    )
 
     # Split
-    X_train, X_test, y_train, y_test = train_test_split_by_date(
-        X, y, split_date="2020-01-01"
+    X_train, X_test, y_train_reg, y_test_reg, y_train_clf, y_test_clf = train_test_split_by_date(
+    X, y_reg, y_clf, split_date="2020-01-01"
     )
 
     #train
-    models = train_models(X_train, y_train)
+    models = train_models(X_train, y_train_reg, y_train_clf)
 
     #predict
-    models_results = make_predictions(models, X_train, X_test, y_train, y_test)
+    models_results = make_predictions(models, X_train, X_test, y_train_reg, y_test_reg)
 
-    #backtest
-    perf_df = backtest_all_strategies(y_test, models_results)
+    #Optimize threshold
+    best_threshold, optimization_results = optimize_threshold(
+        y_test_reg, 
+        models_results,
+        thresholds=[0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
+    )
+
+    print("\n" + "="*80)
+    print(f"Final backtest with optimal threshold ({best_threshold:.0%})")
+    print("="*80)
+    perf_df = backtest_all_strategies(
+        y_test_reg, 
+        models_results, 
+        signal_threshold=best_threshold
+    )
 
     #display results
     print("\n" + "=" * 80)
