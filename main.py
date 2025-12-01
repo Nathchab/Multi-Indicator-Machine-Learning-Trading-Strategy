@@ -57,10 +57,11 @@ def load_data(start : str, end : str) -> Tuple[pd.DataFrame, pd.Series, pd.Serie
     y_reg = y_reg.loc[common_idx]
     y_clf = y_clf.loc[common_idx]
 
-    print(f"\nModel data prepared:")
-    print(f"- Features shape: {X.shape}")
-    print(f"- Target shape: {y_reg.shape}")
-    print(f"- Index match: {X.index.equals(y_reg.index)}")
+    print(f"\n   After final alignment:")
+    print(f"   - X shape: {X.shape}")
+    print(f"   - y_reg shape: {y_reg.shape}")
+    print(f"   - y_clf shape: {y_clf.shape}")
+    print(f"   - Indices match: {X.index.equals(y_reg.index) and X.index.equals(y_clf.index)}")
     
     return features_df, X, y_reg, y_clf
 
@@ -230,6 +231,102 @@ def predictions_to_signals(
     signals[predictions > threshold_value] = 1
     return signals
 
+def compare_feature_sets(
+    X_train, X_test, y_train_reg, y_test_reg, y_train_clf, y_test_clf, stochastic_cols: list
+)-> pd.DataFrame:
+    """
+    Compare model performance with and without stochastic features
+    """
+    print("\n" + "="*80)
+    print("Feature set comparison : Baseline vs Stochastic Feature")
+    print("="*80)
+
+    results_comparison = []
+    print("\n1) Training models without stochastic features...")
+
+    stochastic_cols_present = [col for col in stochastic_cols if col in X_train.columns]
+    
+    valid_rows = X_train[stochastic_cols_present].notna().all(axis=1)
+    
+    X_train_subset = X_train[valid_rows]
+    y_train_reg_subset = y_train_reg[valid_rows]
+    y_train_clf_subset = y_train_clf[valid_rows]
+    
+    print(f"Using {len(X_train_subset)} samples for comparison ({(~valid_rows).sum()} rows with NaN removed)")
+    
+    X_train_baseline = X_train_subset.drop(columns=stochastic_cols, errors='ignore')
+    X_test_baseline = X_test.drop(columns=stochastic_cols, errors='ignore')
+
+
+    models_baseline = train_models(X_train_baseline, y_train_reg_subset, y_train_clf_subset)
+    results_baseline = make_predictions(
+        models_baseline, X_train_baseline, X_test_baseline, y_train_reg_subset, y_test_reg
+    )
+    perf_baseline = backtest_all_strategies(y_test_reg, results_baseline, signal_threshold=0.70)
+
+
+    # Stochastic models (use original X_train, X_test, y_train_reg, y_test_reg)
+    models_stochastic = train_models(X_train_subset, y_train_reg_subset, y_train_clf_subset)
+    results_stochastic = make_predictions(
+        models_stochastic, X_train_subset, X_test, y_train_reg_subset, y_test_reg
+    )
+    perf_stochastic = backtest_all_strategies(y_test_reg, results_stochastic, signal_threshold=0.70)
+
+    print("\n" + "="*80)
+    print("Comparison results")
+    print("="*80)
+
+    comparison_data = []
+
+    for model_name in perf_baseline.index:
+        if model_name == "Buy & Hold" :
+            continue
+        baseline_sharpe = perf_baseline.loc[model_name, "Sharpe Ratio"]
+        stochastic_sharpe = perf_stochastic.loc[model_name, "Sharpe Ratio"]
+
+        baseline_ic = perf_baseline.loc[model_name, "IC (test)"]
+        stochastic_ic = perf_stochastic.loc[model_name, "IC (test)"]
+
+        baseline_return = perf_baseline.loc[model_name, "Total Return (%)"]
+        stochastic_return = perf_stochastic.loc[model_name, "Total Return (%)"]
+
+        sharpe_improvement = ((stochastic_sharpe - baseline_sharpe) / abs(baseline_sharpe) * 100) if not np.isnan(baseline_sharpe) and baseline_sharpe != 0 else np.nan
+        ic_improvement = ((stochastic_ic - baseline_ic) / abs(baseline_ic) * 100) if not np.isnan(baseline_ic) and baseline_ic != 0 else np.nan
+        return_improvement = stochastic_return - baseline_return
+
+        comparison_data.append({
+            "Model": model_name,
+            "Baseline Sharpe" : baseline_sharpe, 
+            "Stochastic Sharpe": stochastic_sharpe,
+            "Sharpe delta (%)" : sharpe_improvement,
+            "Baseline IC" : baseline_ic,
+            "Stochastic IC" : stochastic_ic,
+            "IC delta (%)" : ic_improvement,
+            "Return delta (%)" : return_improvement
+        })
+        comparison_df = pd.DataFrame(comparison_data)
+
+        print("\n")
+        print(comparison_df.round(3))
+
+        print("\n" + "="*80)
+        print("Summary")
+        print("="*80)
+
+        avg_sharpe_improvement = comparison_df["Sharpe delta (%)"].mean()
+        avg_ic_improvement = comparison_df["IC delta (%)"].mean()
+
+        print(f"\nAverage Sharpe improvement : {avg_sharpe_improvement:.2f}%")
+        print(f"Average IC improvement : {avg_ic_improvement:.2f}%")
+
+        if avg_sharpe_improvement > 0:
+            print("\n Stochastic feature improve performance")
+        else: 
+            print("\n Stochastic feature decrease performance")
+        
+        return comparison_df, perf_baseline, perf_stochastic
+
+
 def optimize_threshold(
     y_test: pd.Series, 
     model_results: Dict[str, Dict[str, object]], 
@@ -392,11 +489,32 @@ def main()-> None:
         start="2015-01-01", 
         end="2024-01-01"
     )
+    common_idx = X.index.intersection(y_reg.index).intersection(y_clf.index)
+    X = X.loc[common_idx]
+    y_reg = y_reg.loc[common_idx]
+    y_clf = y_clf.loc[common_idx]
+    print(f"\nAfter alignment: X shape={X.shape}, y_reg shape={y_reg.shape}, y_clf shape={y_clf.shape}")
 
     # Split
     X_train, X_test, y_train_reg, y_test_reg, y_train_clf, y_test_clf = train_test_split_by_date(
     X, y_reg, y_clf, split_date="2020-01-01"
     )
+
+    #feature comparison
+    fe = FeatureEngineer()
+    stochastic_cols = fe.get_stochastic_feature_names()
+    
+    comparison_df, perf_baseline, perf_stochastic = compare_feature_sets(
+    X_train, X_test,
+    y_train_reg,
+    y_test_reg, 
+    y_train_clf, 
+    y_test_clf,
+    stochastic_cols
+)
+    print("\n" + "="*80)
+    print("Using stochastic feature for threshold optimization")
+    print("="*80)
 
     #train
     models = train_models(X_train, y_train_reg, y_train_clf)

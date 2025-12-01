@@ -170,12 +170,49 @@ class FeatureEngineer:
     ).astype(int)
             
         return df
+
+    def create_stochastic_feature(self, df: pd.DataFrame)-> pd.DataFrame:
+        """create features based on stochastic calculus (GBM framework)
+        """
+        result = df.copy()
+
+        log_returns = np.log(df["close"] / df["close"].shift(1))
+
+        result["drift_20d"] = log_returns.rolling(20).mean() * 252
+        result["drift_60d"] = log_returns.rolling(60).mean() * 252
+        result["drift_120d"] = log_returns.rolling(120).mean() * 252
+
+        result["sigma_20d"] = log_returns.rolling(20).std() * np.sqrt(252)
+        result["sigma_60d"] = log_returns.rolling(60).std() * np.sqrt(252)
+        result["sigma_120d"] = log_returns.rolling(120).std() * np.sqrt(252)
+
+        result["drift_vol_ratio_20d"] = result["drift_20d"] / (result["sigma_20d"] + 1e-8)
+        result["drift_vol_ratio_60d"] = result["drift_60d"] / (result["sigma_60d"] + 1e-8)
+        
+        result["vol_of_vol_20d"] = result["sigma_20d"].rolling(20).std()
+        result["vol_of_vol_60d"] = result["sigma_60d"].rolling(20).std()
+
+        result["sigma_regime"] = (result["sigma_20d"] / (result["sigma_60d"] + 1e-8)) -1
+
+        result["drift_mean_reversion"] = result["drift_20d"] - result["drift_60d"]
+
+        return result
     
+    def get_stochastic_feature_names(self)-> List:
+        return [
+            "drift_20d", "drift_60d", "drift_120d",
+            "sigma_20d", "sigma_60d", "sigma_120d",
+            "drift_vol_ratio_20d", "drift_vol_ratio_60d",
+            "vol_of_vol_20d", "vol_of_vol_60d",
+            "sigma_regime", "drift_mean_reversion"
+        ]
+
     def create_all_features(
         self, 
         df: pd.DataFrame,
         vix: Optional[pd.Series] = None,
-        rf: Optional[pd.Series] = None
+        rf: Optional[pd.Series] = None,
+        include_stochastic: bool = True
     ) -> pd.DataFrame:
         """
         Create full feature set (MVP version).
@@ -208,13 +245,16 @@ class FeatureEngineer:
         if vix is not None:
                 df = df.join(vix, how='left')
                 df['vix_change'] = df['vix'].pct_change().shift(1)
-                print("✓ VIX added")
+                print("VIX added")
         
         if rf is not None:
             df = df.join(rf, how='left')
             if 'return_1d' in df.columns:
                 df['excess_return_1d'] = df['return_1d'] - (df['rf'] / 252)
             print("Risk-free rate added")
+
+        if include_stochastic:
+            df = self.create_stochastic_feature(df)
         
         df = self.create_target(df)
         print("Target created")    
@@ -279,8 +319,18 @@ def prepare_model_data(
         y_reg = y_reg[valid_idx]
         y_clf = y_clf[valid_idx]
         
+        common_idx = X.index.intersection(y_reg.index).intersection(y_clf.index)
+        X = X.loc[common_idx]
+        y_reg = y_reg.loc[common_idx]
+        y_clf = y_clf.loc[common_idx]
+
         print(f"Data prepared: {len(X)} valid samples")
         print(f"Dropped {(~valid_idx).sum()} rows with NaN")
+    else: 
+        common_idx = X.index.intersection(y_reg.index).intersection(y_clf.index)
+        X = X.loc[common_idx]
+        y_reg = y_reg.loc[common_idx]
+        y_clf = y_clf.loc[common_idx]
 
     return X, y_reg, y_clf
 
