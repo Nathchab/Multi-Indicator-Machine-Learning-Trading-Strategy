@@ -15,8 +15,10 @@ from __future__ import annotations
 from typing import Dict, Tuple
 
 import numpy as np 
-import pandas as pd 
+import pandas as pd
+import matplotlib.pyplot as plt 
 from scipy.stats import spearmanr
+
 
 from src.data.fetcher import (
     get_single_ticker,
@@ -564,7 +566,7 @@ def main()-> None:
 
     # Best Sharpe
     best_sharpe_model = perf_df["Sharpe Ratio"].idxmax()
-    print(f"\n✓ Best Sharpe Ratio: {best_sharpe_model}")
+    print(f"\nBest Sharpe Ratio: {best_sharpe_model}")
     print(f"  Sharpe = {perf_df.loc[best_sharpe_model, 'Sharpe Ratio']:.3f}")
     if "Buy & Hold" in perf_df.index:
         print(f"  vs Buy & Hold = {perf_df.loc['Buy & Hold', 'Sharpe Ratio']:.3f}")
@@ -579,7 +581,7 @@ def main()-> None:
             best_ml_name = ml_ics.idxmax()
             improvement = ((best_ml_ic - ols_ic) / abs(ols_ic) * 100)
             
-            print(f"\n✓ ML vs OLS:")
+            print(f"\nML vs OLS:")
             print(f"  OLS IC: {ols_ic:.4f}")
             print(f"  Best ML IC: {best_ml_ic:.4f} ({best_ml_name})")
             print(f"  Improvement: {improvement:.1f}%")
@@ -587,6 +589,74 @@ def main()-> None:
         print("\nOLS model not available for comparison")
 
     print("\n" + "=" * 80)
+
+#graphic 
+    stochastic_cols = fe.get_stochastic_feature_names()
+
+    X_train_baseline = X_train.drop(columns=stochastic_cols, errors="ignore")
+    X_test_baseline  = X_test.drop(columns=stochastic_cols,  errors="ignore")
+
+    #random forest without stochastic feature
+    rf_baseline = make_random_forest(
+        n_estimators=300,
+        max_depth=10,
+        min_samples_leaf=5,
+        random_state=42
+    )
+    rf_baseline.fit(X_train_baseline, y_train_reg)
+
+    pred_rf_base = pd.Series(
+        rf_baseline.predict(X_test_baseline),
+        index=y_test_reg.index,
+        name="rf_base_pred"
+    )
+    signals_base = predictions_to_signals(
+        pred_rf_base,
+        threshold_quantile=best_threshold
+    )
+
+    bt_base = backtest_signals(
+        returns=y_test_reg,
+        signals=signals_base,
+        trading_cost_bps=1.0,
+        starting_capital=1.0
+    )
+
+    #random forest with stochastics features
+    rf_stoch = models["Random Forest"]
+    pred_rf_stoch = models_results["Random Forest"]["pred"]
+    signals_stoch = predictions_to_signals(
+        pred_rf_stoch,
+        threshold_quantile=best_threshold
+    )
+
+    bt_stoch = backtest_signals(
+        returns=y_test_reg,
+        signals=signals_stoch,
+        trading_cost_bps=1.0,
+        starting_capital=1.0
+    )
+
+    #buy & hold
+    bh_equity = (1 + y_test_reg).cumprod()
+    bh_equity.name = "Buy & Hold"
+
+    #plot 
+    plt.figure(figsize=(12, 6))
+    plt.plot(bt_base.equity_curve,  label=f"RF baseline (thr={best_threshold:.0%})")
+    plt.plot(bt_stoch.equity_curve, label=f"RF + stochastic (thr={best_threshold:.0%})")
+    plt.plot(bh_equity.index, bh_equity.values, "--", label="Buy & Hold")
+
+    plt.title("Equity curves – RF baseline vs RF + stochastic vs Buy & Hold")
+    plt.xlabel("Date")
+    plt.ylabel("Equity (normalized)")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("equity_comparison.png", dpi=300)
+    plt.close()
+    print("\nPlot saved as: equity_comparison.png")
+
 
 if __name__ == "__main__":
     main()
