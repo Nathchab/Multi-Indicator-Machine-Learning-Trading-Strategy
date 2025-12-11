@@ -8,7 +8,9 @@ Pipeline :
 4. Train models (OLS, RandomForest, XGBoost, LightGBM)
 5. Generate trading signals from predictions
 6. Backtest all strategies with transaction costs
-7. Print performance comparison table
+7. Compare feature sets (baseline vs stochastic)
+8. Print performance comparison table
+9. Equity curve visualization
 """
 from __future__ import annotations
 
@@ -33,6 +35,7 @@ from src.models.ml_models import (
     make_xgboost
 )
 from src.evaluation.backtest import backtest_signals
+from src.evaluation.walkforward import walk_forward_backtest
 
 def load_data(start : str, end : str) -> Tuple[pd.DataFrame, pd.Series, pd.Series]:
     #Load and prepare data with features
@@ -589,6 +592,104 @@ def main()-> None:
         print("\nOLS model not available for comparison")
 
     print("\n" + "=" * 80)
+
+    #Walkforward backtest (500 days train and 20 days test) - random forest
+    print("\n" + "="*80)
+    print("WALK-FORWARD BACKTEST - RANDOM FOREST (500d train / 20d test)")
+    print("="*80)
+
+
+    wf_models = {
+        "Random Forest": make_random_forest(
+            n_estimators=300,
+            max_depth=10,
+            min_samples_leaf=5,
+            random_state=42,
+        )
+    }
+
+    wf_preds = walk_forward_backtest(
+        X=X,
+        y=y_reg,
+        models=wf_models,
+        train_window=500,
+        test_window=20,
+        verbose=True,
+    )
+
+    #predictions RF walkforward
+    rf_wf_pred = wf_preds["Random Forest"]
+
+    #building signal wiht the same optimal threshold
+    wf_signals = predictions_to_signals(
+        rf_wf_pred,
+        threshold_quantile=best_threshold
+    )
+
+    #backtest walk-forward on the same period 
+    wf_bt = backtest_signals(
+        returns=y_reg.loc[rf_wf_pred.index],
+        signals=wf_signals,
+        trading_cost_bps=1.0,
+        starting_capital=1.0,
+    )
+
+    wf_equity = (1 + wf_bt.strategy_returns).cumprod()
+
+    #stats walk forward
+    ret_wf = wf_bt.strategy_returns
+    if ret_wf.std() > 0:
+        wf_sharpe = (ret_wf.mean() / ret_wf.std()) * np.sqrt(252)
+    else:
+        wf_sharpe = 0.0
+
+    wf_total_return = (wf_equity.iloc[-1] - 1) * 100
+    running_max_wf = wf_equity.expanding().max()
+    dd_wf = (wf_equity - running_max_wf) / running_max_wf
+    wf_max_dd = dd_wf.min() * 100
+    wf_time_in_mkt = wf_signals.mean() * 100
+
+    print("\nWalk-forward RF performance:")
+    print(f"  Total Return: {wf_total_return:.2f}%")
+    print(f"  Sharpe Ratio: {wf_sharpe:.3f}")
+    print(f"  Max Drawdown: {wf_max_dd:.2f}%")
+    print(f"  Time in Market: {wf_time_in_mkt:.1f}%")
+
+    #buy and hold allign on the same period
+    bh_equity_wf = (1 + y_reg.loc[rf_wf_pred.index]).cumprod()
+
+    #compare with RF (fix split)
+    rf_fixed_pred = models_results["Random Forest"]["pred"]
+    rf_fixed_signals = predictions_to_signals(
+        rf_fixed_pred,
+        threshold_quantile=best_threshold
+    )
+    rf_fixed_bt = backtest_signals(
+        returns=y_test_reg,   #fix test period
+        signals=rf_fixed_signals,
+        trading_cost_bps=1.0,
+        starting_capital=1.0,
+    )
+    rf_fixed_equity = (1 + rf_fixed_bt.strategy_returns).cumprod()
+
+    #plot 3 curves : RF walk-forward, fix RF , Buy & Hold
+    plt.figure(figsize=(12, 6))
+    plt.plot(wf_equity.index, wf_equity.values, label="RF Walk-forward")
+    plt.plot(rf_fixed_equity.index, rf_fixed_equity.values, label="RF split fixe (post-2020)")
+    plt.plot(bh_equity_wf.index, bh_equity_wf.values, "--", label="Buy & Hold")
+
+    plt.title("Equity curves – RF Walk-forward vs RF fix split vs Buy & Hold")
+    plt.xlabel("Date")
+    plt.ylabel("Equity (normalized)")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+
+    #save the graphic 
+    plt.savefig("equity_walkforward_rf.png", dpi=300)
+    plt.close()
+
+    print("\nSaved walk-forward comparison plot as: equity_walkforward_rf.png")   
 
 #graphic 
     stochastic_cols = fe.get_stochastic_feature_names()
