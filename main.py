@@ -1,765 +1,289 @@
-"""
-main script to compare OLS and ML models for SPY trading strategy.
-
-Pipeline :
-1. Download market data (SPY, VIX, risk-free rate)
-2. Engineer features
-3. Split train / test by date
-4. Train models (OLS, RandomForest, XGBoost, LightGBM)
-5. Generate trading signals from predictions
-6. Backtest all strategies with transaction costs
-7. Compare feature sets (baseline vs stochastic)
-8. Print performance comparison table
-9. Equity curve visualization
-"""
-from __future__ import annotations
-
-from typing import Dict, Tuple
-
-import numpy as np 
 import pandas as pd
-import matplotlib.pyplot as plt 
+import numpy as np
+import matplotlib.pyplot as plt
 from scipy.stats import spearmanr
-
 
 from src.data.fetcher import (
     get_single_ticker,
     get_vix,
-    get_risk_free_rate
+    get_risk_free_rate,
 )
 from src.data.features import FeatureEngineer, prepare_model_data
-from src.models.baseline import OLSModel
-from src.models.ml_models import (
-    make_random_forest,
-    make_lightgbm,
-    make_xgboost
-)
+from src.models.ml_models import make_random_forest, make_xgboost, make_lightgbm
 from src.evaluation.backtest import backtest_signals
-from src.evaluation.walkforward import walk_forward_backtest
 
-def load_data(start : str, end : str) -> Tuple[pd.DataFrame, pd.Series, pd.Series]:
-    #Load and prepare data with features
-    print("\n1) Loading market data...")
-    spy = get_single_ticker("SPY", start, end, use_cache=True)
-    vix = get_vix(start, end, use_cache=True)
-    rf = get_risk_free_rate(start, end, use_cache=True)
 
-    print(f"SPY : {len(spy)} rows")
-    print(f"VIX : {len(vix)} rows")
-    print(f"RF : {len(rf)} rows")
-
-    fe = FeatureEngineer()
-    print("\n2) Creating features...")
-    features_df = fe.create_all_features(spy, vix=vix, rf=rf)
-    
-    print(f"Features created: {len(features_df.columns)} columns")
-    print(f"Date range: {features_df.index.min().date()} to {features_df.index.max().date()}")
-
-    X, y_reg, y_clf = prepare_model_data(features_df, fe, dropna=True)
-
-    common_idx = X.index.intersection(y_reg.index).intersection(y_clf.index)
-    X = X.loc[common_idx]
-    y_reg = y_reg.loc[common_idx]
-    y_clf = y_clf.loc[common_idx]
-
-    print(f"\n   After final alignment:")
-    print(f"   - X shape: {X.shape}")
-    print(f"   - y_reg shape: {y_reg.shape}")
-    print(f"   - y_clf shape: {y_clf.shape}")
-    print(f"   - Indices match: {X.index.equals(y_reg.index) and X.index.equals(y_clf.index)}")
-    
-    return features_df, X, y_reg, y_clf
-
-def train_test_split_by_date(
-    X: pd.DataFrame,
-    y_reg : pd.Series,
-    y_clf: pd.Series,
-    split_date : str
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series]:
-    #split data by date (respects temporal ordering)
-    print("\n3) Train / test split...")
-
-    assert X.index.equals(y_reg.index) and X.index.equals(y_clf.index)
-
-    train_mask = X.index < split_date
-    test_mask = X.index >= split_date
-    
-    X_train = X.loc[train_mask]
-    y_train_reg = y_reg.loc[train_mask]
-    y_train_clf = y_clf.loc[train_mask]
-    
-    X_test = X.loc[test_mask]
-    y_test_reg = y_reg.loc[test_mask]
-    y_test_clf = y_clf.loc[test_mask]
-
-    print(f"Train period: {X_train.index[0].date()} to {X_train.index[-1].date()}")
-    print(f"- Observations: {len(X_train)}")
-    print(f"Test period: {X_test.index[0].date()} to {X_test.index[-1].date()}")
-    print(f"- Observations: {len(X_test)}")
-    print(f"Train/test ratio: {len(X_train) / (len(X_train) + len(X_test)) * 100:.1f}% / {len(X_test) / (len(X_train) + len(X_test)) * 100:.1f}%")
-    
-    return X_train, X_test, y_train_reg, y_test_reg, y_train_clf, y_test_clf
-
-def train_models(
-    X_train : pd.DataFrame, 
-    y_train_reg : pd.Series,
-    y_train_clf: pd.Series
-) -> Dict[str, object]:
-    #train all models
-    print("\n4) Training models...")
-    models: Dict[str, object] = {}
-
-    print("Training OLS...")
-    try:
-        ols = OLSModel(use_hac=True, maxlags=5)
-        try:
-            ols.fit(X_train, y_train_reg)
-        except TypeError:
-            ols.fit(X_train, y_train_reg, add_constant=True, standardize=True)
-        models["OLS"] = ols
-        print("OLS trained")
-    except Exception as e:
-        print(f"OLS training failed: {e}")
-
-    #random forest
-    print("Training random forest")
-    rf = make_random_forest(
-        n_estimators=300,
-        max_depth=10,
-        min_samples_leaf=5,
-        random_state=42
-    )
-    rf.fit(X_train, y_train_reg)
-    models["Random Forest"] = rf
-    print("Random Forest trained")
-    
-    #XGBoost
-    print("Training XGBoost")
-    try:
-        xgb = make_xgboost(
-            learning_rate=0.05,
-            n_estimators=400,
-            max_depth=5,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            random_state=42
-        )
-        xgb.fit(X_train, y_train_reg)
-        models["XGBoost"] = xgb
-        print("XGBoost trained")
-    except ImportError:
-        print("XGBoost not available")
-
-    #LightGBM
-    print("Training LightGBM")
-    try:
-        lgbm = make_lightgbm(
-            learning_rate=0.05,
-            n_estimators=400,
-            num_leaves=31,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            random_state=42
-        )
-        lgbm.fit(X_train, y_train_reg)
-        models["LightGBM"] = lgbm
-        print("LightGBM trained")
-    except ImportError:
-        print("LightGBM not available")
-    return models
-
-def make_predictions(
-    models: Dict[str, object], 
-    X_train: pd.DataFrame,
-    X_test: pd.DataFrame, 
-    y_train: pd.Series,
-    y_test: pd.Series
-) -> Dict[str, Dict[str, object]]:
-    """
-    Run predictions and calculate metrics (R-squared, IC) for each model.
-    """
-    print("\n5) Evaluating models (predictive power)...")
-    results: Dict[str, Dict[str, object]] = {}
-    
-    for name, model in models.items():
-        print(f"\n   -> {name}")
-
-        #Train score
-        try:
-            r2_train = model.score(X_train, y_train)
-        except Exception as e:
-            r2_train = np.nan
-        
-        #Test score
-        try:
-            r2_test = model.score(X_test, y_test)
-        except Exception as e:
-            r2_test = np.nan
-        
-        #Predictions
-        y_pred_raw = model.predict(X_test)
-        
-        #Force conversion to Series with X_test index
-        if isinstance(y_pred_raw, pd.Series):
-            y_pred = pd.Series(y_pred_raw.values, index=X_test.index, name="pred")
-        else:
-            #NumPy array or other - convert
-            y_pred = pd.Series(y_pred_raw, index=X_test.index, name="pred")
-        
-        #Information Coefficient
-        ic, pval = spearmanr(y_pred, y_test)
-        
-        #Display
-        if not np.isnan(r2_train):
-            print(f"R-squared (train): {r2_train:.4f}")
-        if not np.isnan(r2_test):
-            print(f"R-squared (test):  {r2_test:.4f}")
-        print(f"IC (test):  {ic:.4f} (p-value: {pval:.6f})")
-        
-        results[name] = {
-            "model": model,
-            "pred": y_pred,
-            "r2_train": r2_train,
-            "r2_test": r2_test,
-            "ic": ic,
-            "ic_pval": pval
-        }
-    
-    return results
-
-def predictions_to_signals(
-    predictions : pd.Series, threshold_quantile: float = 0.7
-)-> pd.Series:
-
+def predictions_to_signals(predictions, threshold_quantile=0.4):
+    """Convert predictions to binary trading signals."""
     threshold_value = predictions.quantile(threshold_quantile)
-    signals = pd.Series(0, index=predictions.index, name="signal")
-    signals[predictions > threshold_value] = 1
+    signals = (predictions > threshold_value).astype(int)
     return signals
 
-def compare_feature_sets(
-    X_train, X_test, y_train_reg, y_test_reg, y_train_clf, y_test_clf, stochastic_cols: list
-)-> pd.DataFrame:
+
+def evaluate_model(model, X_train, X_test, y_train, y_test, threshold=0.4):
     """
-    Compare model performance with and without stochastic features
+    Train model, generate predictions, backtest, and return metrics.
+    
+    Returns:
+        dict with equity curve, returns, and performance metrics
     """
-    print("\n" + "="*80)
-    print("Feature set comparison : Baseline vs Stochastic Feature")
-    print("="*80)
-
-    results_comparison = []
-    print("\n1) Training models without stochastic features...")
-
-    stochastic_cols_present = [col for col in stochastic_cols if col in X_train.columns]
+    #Train
+    model.fit(X_train, y_train)
     
-    valid_rows = X_train[stochastic_cols_present].notna().all(axis=1)
+    #Predict
+    y_pred = pd.Series(model.predict(X_test), index=X_test.index)
     
-    X_train_subset = X_train[valid_rows]
-    y_train_reg_subset = y_train_reg[valid_rows]
-    y_train_clf_subset = y_train_clf[valid_rows]
+    #Information Coefficient
+    ic, ic_pval = spearmanr(y_pred, y_test)
     
-    print(f"Using {len(X_train_subset)} samples for comparison ({(~valid_rows).sum()} rows with NaN removed)")
+    #Generate signals
+    signals = predictions_to_signals(y_pred, threshold_quantile=threshold)
     
-    X_train_baseline = X_train_subset.drop(columns=stochastic_cols, errors='ignore')
-    X_test_baseline = X_test.drop(columns=stochastic_cols, errors='ignore')
-
-
-    models_baseline = train_models(X_train_baseline, y_train_reg_subset, y_train_clf_subset)
-    results_baseline = make_predictions(
-        models_baseline, X_train_baseline, X_test_baseline, y_train_reg_subset, y_test_reg
+    #Backtest
+    results = backtest_signals(
+        returns=y_test,
+        signals=signals,
+        trading_cost_bps=1.0
     )
-    perf_baseline = backtest_all_strategies(y_test_reg, results_baseline, signal_threshold=0.70)
-
-
-    # Stochastic models (use original X_train, X_test, y_train_reg, y_test_reg)
-    models_stochastic = train_models(X_train_subset, y_train_reg_subset, y_train_clf_subset)
-    results_stochastic = make_predictions(
-        models_stochastic, X_train_subset, X_test, y_train_reg_subset, y_test_reg
-    )
-    perf_stochastic = backtest_all_strategies(y_test_reg, results_stochastic, signal_threshold=0.70)
-
-    print("\n" + "="*80)
-    print("Comparison results")
-    print("="*80)
-
-    comparison_data = []
-
-    for model_name in perf_baseline.index:
-        if model_name == "Buy & Hold" :
-            continue
-        baseline_sharpe = perf_baseline.loc[model_name, "Sharpe Ratio"]
-        stochastic_sharpe = perf_stochastic.loc[model_name, "Sharpe Ratio"]
-
-        baseline_ic = perf_baseline.loc[model_name, "IC (test)"]
-        stochastic_ic = perf_stochastic.loc[model_name, "IC (test)"]
-
-        baseline_return = perf_baseline.loc[model_name, "Total Return (%)"]
-        stochastic_return = perf_stochastic.loc[model_name, "Total Return (%)"]
-
-        sharpe_improvement = ((stochastic_sharpe - baseline_sharpe) / abs(baseline_sharpe) * 100) if not np.isnan(baseline_sharpe) and baseline_sharpe != 0 else np.nan
-        ic_improvement = ((stochastic_ic - baseline_ic) / abs(baseline_ic) * 100) if not np.isnan(baseline_ic) and baseline_ic != 0 else np.nan
-        return_improvement = stochastic_return - baseline_return
-
-        comparison_data.append({
-            "Model": model_name,
-            "Baseline Sharpe" : baseline_sharpe, 
-            "Stochastic Sharpe": stochastic_sharpe,
-            "Sharpe delta (%)" : sharpe_improvement,
-            "Baseline IC" : baseline_ic,
-            "Stochastic IC" : stochastic_ic,
-            "IC delta (%)" : ic_improvement,
-            "Return delta (%)" : return_improvement
-        })
-        comparison_df = pd.DataFrame(comparison_data)
-
-        print("\n")
-        print(comparison_df.round(3))
-
-        print("\n" + "="*80)
-        print("Summary")
-        print("="*80)
-
-        avg_sharpe_improvement = comparison_df["Sharpe delta (%)"].mean()
-        avg_ic_improvement = comparison_df["IC delta (%)"].mean()
-
-        print(f"\nAverage Sharpe improvement : {avg_sharpe_improvement:.2f}%")
-        print(f"Average IC improvement : {avg_ic_improvement:.2f}%")
-
-        if avg_sharpe_improvement > 0:
-            print("\n Stochastic feature improve performance")
-        else: 
-            print("\n Stochastic feature decrease performance")
-        
-        return comparison_df, perf_baseline, perf_stochastic
-
-
-def optimize_threshold(
-    y_test: pd.Series, 
-    model_results: Dict[str, Dict[str, object]], 
-    thresholds: list = [0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
-    ) -> Tuple[float, pd.DataFrame]:
-    """Test multiple thresholds and find best Sharpe."""
-    print("\n" + "="*80)
-    print("Thresold optimization")
-    print("="*80)
     
-    best_sharpe = -np.inf
-    best_threshold = None
-    results = []
+    #Calculate metrics
+    equity = (1 + results.strategy_returns).cumprod()
+    total_return = (equity.iloc[-1] - 1) * 100
+    sharpe = (results.strategy_returns.mean() / results.strategy_returns.std()) * np.sqrt(252)
     
-    for threshold in thresholds:
-        print(f"\nTesting threshold = {threshold:.0%}...")
-        perf_df = backtest_all_strategies(y_test, model_results, signal_threshold=threshold)   
-        
-        #best model's Sharpe
-        ml_models = perf_df.drop("Buy & Hold", errors='ignore')
-        if len(ml_models) > 0:
-            sharpe_series = ml_models["Sharpe Ratio"].dropna()
-            if len(sharpe_series) == 0:
-                continue
-            best_model = sharpe_series.idxmax()
-            sharpe = ml_models.loc[best_model, "Sharpe Ratio"] if "Sharpe Ratio" in ml_models.columns else ml_models.loc[best_model, "Sharpe"]
-            time_in_market = ml_models.loc[best_model, "Time in Market (%)"]
-            
-            print(f"  Best model: {best_model}")
-            print(f"  Sharpe: {sharpe:.3f}")
-            print(f"  Time in Market: {time_in_market:.1f}%")
-            
-            results.append({
-                "Threshold": threshold,
-                "Best Model": best_model,
-                "Sharpe": sharpe,
-                "Time in Market (%)": time_in_market
-            })
-            
-            if sharpe > best_sharpe:
-                best_sharpe = sharpe
-                best_threshold = threshold
+    running_max = equity.expanding().max()
+    drawdown = (equity - running_max) / running_max
+    max_dd = drawdown.min() * 100
     
-    results_df = pd.DataFrame(results)
-    print("\n" + "="*80)
-    print("Threshold optimization")
-    print("="*80)
-    print(results_df.round(3))
-    if best_threshold is None:
-        print("\nNo valid threshold found, using default 0.70")
-        best_threshold = 0.70
-    else:
-        print(f"\nBest threshold: {best_threshold:.0%} (Sharpe = {best_sharpe:.3f})")
-
-    return best_threshold, results_df
-
-def backtest_all_strategies(
-    y_test : pd.Series, model_results: Dict[str, Dict[str, object]],
-    signal_threshold: float = 0.7
-)-> pd.DataFrame:
-    print("\n6) Backtesting all strategies (with transaction costs)...")
-
-    performance_summary: Dict[str, Dict[str, float]] = {}
-
-    for name, res in model_results.items():
-        print(f"\nBacktesting {name}...")
-        pred = res["pred"]
-
-        signals = predictions_to_signals(pred, threshold_quantile=signal_threshold) #change the time in the market to see if it changes the perfomance 
-
-        bt = backtest_signals(
-            returns=y_test,
-            signals=signals, 
-            trading_cost_bps=1.0,
-            starting_capital=1.0
-        )
-        ret = bt.strategy_returns
-        equity = (1 + ret).cumprod()
-
-        if ret.std() > 0:
-            sharpe = (ret.mean() / ret.std()) * np.sqrt(252)
-        else:
-            sharpe = 0.0
-
-        #total return
-        total_return = (equity.iloc[-1] -1) * 100
-
-        #max drawdown
-        running_max = equity.expanding().max()
-        drawdown = (equity - running_max) / running_max
-        max_dd = drawdown.min() * 100
-
-        #trade stats
-        num_trades = signals.diff().abs().sum()
-        time_in_mkt = signals.mean() * 100
-
-        #win rate
-        wins = (ret > 0).sum()
-        losses = (ret < 0).sum()
-        win_rate = (wins / (wins + losses)) * 100 if (wins + losses) > 0 else 0
-
-        performance_summary[name] = {
-            "Total Return (%)": total_return,
-            "Sharpe Ratio": sharpe,
-            "Max Drawdown (%)": max_dd,
-            "Win Rate (%)": win_rate,
-            "Num Trades": num_trades,
-            "Time in Market (%)": time_in_mkt,
-            "IC (test)": res["ic"],
-            "IC p-value": res["ic_pval"],
-            "Overfit": res["r2_train"] - res["r2_test"] if not np.isnan(res["r2_train"]) else np.nan
-        }
-
-        print(f"Total Return: {total_return:.2f}%")
-        print(f"Sharpe: {sharpe:.3f}")
-        print(f"Max DD: {max_dd:.2f}%")
-        print(f"Time in Market: {time_in_mkt:.1f}%")
-
-        # Buy & Hold benchmark
-    print("\n   -> Backtesting Buy & Hold...")
-    bh_equity = (1 + y_test).cumprod()
-    bh_total_return = (bh_equity.iloc[-1] - 1) * 100
-    bh_running_max = bh_equity.expanding().max()
-    bh_dd = (bh_equity - bh_running_max) / bh_running_max
-    bh_max_dd = bh_dd.min() * 100
-    bh_sharpe = (y_test.mean() / y_test.std()) * np.sqrt(252) if y_test.std() > 0 else 0.0
-    bh_wins = (y_test > 0).sum()
-    bh_losses = (y_test < 0).sum()
-    bh_win_rate = (bh_wins / (bh_wins + bh_losses)) * 100 if (bh_wins + bh_losses) > 0 else 0
-
-    performance_summary["Buy & Hold"] = {
-        "Total Return (%)": bh_total_return,
-        "Sharpe Ratio": bh_sharpe,
-        "Max Drawdown (%)": bh_max_dd,
-        "Win Rate (%)": bh_win_rate,
-        "Num Trades": 0.0,
-        "Time in Market (%)": 100.0,
-        "IC (test)": np.nan,
-        "IC p-value": np.nan,
-        "Overfit": np.nan
-}
-
-    perf_df = pd.DataFrame(performance_summary).T
-    return perf_df
-
-def main()-> None:
-    #Main execution function
-    print("=" * 80)
-    print("SPY TRADING STRATEGY - OLS vs ML MODELS")
-    print("=" * 80)
-    print("\nReproducing analysis from ML comparison notebook...")
-    print("Configuration:")
-    print("- Data: 2015-01-01 to 2024-01-01")
-    print("- Split: 2020-01-01")
-    print("- Signal threshold: 70th percentile")
-    print("- Transaction costs: 1 basis point")
-
-    # Load data
-    features_df, X, y_reg, y_clf = load_data(
-        start="2015-01-01", 
-        end="2024-01-01"
-    )
-    common_idx = X.index.intersection(y_reg.index).intersection(y_clf.index)
-    X = X.loc[common_idx]
-    y_reg = y_reg.loc[common_idx]
-    y_clf = y_clf.loc[common_idx]
-    print(f"\nAfter alignment: X shape={X.shape}, y_reg shape={y_reg.shape}, y_clf shape={y_clf.shape}")
-
-    # Split
-    X_train, X_test, y_train_reg, y_test_reg, y_train_clf, y_test_clf = train_test_split_by_date(
-    X, y_reg, y_clf, split_date="2020-01-01"
-    )
-
-    #feature comparison
-    fe = FeatureEngineer()
-    stochastic_cols = fe.get_stochastic_feature_names()
+    #Time in market
+    time_in_market = signals.mean() * 100
     
-    comparison_df, perf_baseline, perf_stochastic = compare_feature_sets(
-    X_train, X_test,
-    y_train_reg,
-    y_test_reg, 
-    y_train_clf, 
-    y_test_clf,
-    stochastic_cols
-)
-    print("\n" + "="*80)
-    print("Using stochastic feature for threshold optimization")
-    print("="*80)
-
-    #train
-    models = train_models(X_train, y_train_reg, y_train_clf)
-
-    #predict
-    models_results = make_predictions(models, X_train, X_test, y_train_reg, y_test_reg)
-
-    #Optimize threshold
-    best_threshold, optimization_results = optimize_threshold(
-        y_test_reg, 
-        models_results,
-        thresholds=[0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
-    )
-
-    print("\n" + "="*80)
-    print(f"Final backtest with optimal threshold ({best_threshold:.0%})")
-    print("="*80)
-    perf_df = backtest_all_strategies(
-        y_test_reg, 
-        models_results, 
-        signal_threshold=best_threshold
-    )
-
-    #display results
-    print("\n" + "=" * 80)
-    print("FINAL PERFORMANCE SUMMARY")
-    print("=" * 80)
-    print(perf_df.round(3))
-
-    # Key insights
-    print("\n" + "=" * 80)
-    print("KEY FINDINGS")
-    print("=" * 80)
-
-    # Check which models are available
-    available_models = perf_df.index.tolist()
-    print(f"\nModels evaluated: {', '.join(available_models)}")
-
-    # Best IC (excluding Buy & Hold)
-    ic_data = perf_df.drop("Buy & Hold", errors='ignore')["IC (test)"].dropna()
-    if len(ic_data) > 0:
-        best_ic_model = ic_data.idxmax()
-        print(f"\n✓ Best Information Coefficient: {best_ic_model}")
-        print(f"  IC = {perf_df.loc[best_ic_model, 'IC (test)']:.4f}")
-        if 'IC p-value' in perf_df.columns:
-            print(f"  p-value = {perf_df.loc[best_ic_model, 'IC p-value']:.6f}")
-
-    # Best Sharpe
-    best_sharpe_model = perf_df["Sharpe Ratio"].idxmax()
-    print(f"\nBest Sharpe Ratio: {best_sharpe_model}")
-    print(f"  Sharpe = {perf_df.loc[best_sharpe_model, 'Sharpe Ratio']:.3f}")
-    if "Buy & Hold" in perf_df.index:
-        print(f"  vs Buy & Hold = {perf_df.loc['Buy & Hold', 'Sharpe Ratio']:.3f}")
-
-    # ML vs OLS comparison (only if OLS exists)
-    if "OLS" in perf_df.index and len(ic_data) > 1:
-        ols_ic = perf_df.loc["OLS", "IC (test)"]
-        ml_ics = ic_data.drop("OLS", errors='ignore')
-        
-        if len(ml_ics) > 0 and not np.isnan(ols_ic) and ols_ic != 0:
-            best_ml_ic = ml_ics.max()
-            best_ml_name = ml_ics.idxmax()
-            improvement = ((best_ml_ic - ols_ic) / abs(ols_ic) * 100)
-            
-            print(f"\nML vs OLS:")
-            print(f"  OLS IC: {ols_ic:.4f}")
-            print(f"  Best ML IC: {best_ml_ic:.4f} ({best_ml_name})")
-            print(f"  Improvement: {improvement:.1f}%")
-    elif "OLS" not in perf_df.index:
-        print("\nOLS model not available for comparison")
-
-    print("\n" + "=" * 80)
-
-    #Walkforward backtest (500 days train and 20 days test) - random forest
-    print("\n" + "="*80)
-    print("WALK-FORWARD BACKTEST - RANDOM FOREST (500d train / 20d test)")
-    print("="*80)
-
-
-    wf_models = {
-        "Random Forest": make_random_forest(
-            n_estimators=300,
-            max_depth=10,
-            min_samples_leaf=5,
-            random_state=42,
-        )
+    #Number of trades
+    num_trades = signals.diff().abs().sum()
+    
+    return {
+        'equity': equity,
+        'returns': results.strategy_returns,
+        'total_return': total_return,
+        'sharpe': sharpe,
+        'max_drawdown': max_dd,
+        'ic': ic,
+        'ic_pval': ic_pval,
+        'time_in_market': time_in_market,
+        'num_trades': num_trades,
+        'signals': signals
     }
 
-    wf_preds = walk_forward_backtest(
-        X=X,
-        y=y_reg,
-        models=wf_models,
-        train_window=500,
-        test_window=20,
-        verbose=True,
-    )
 
-    #predictions RF walkforward
-    rf_wf_pred = wf_preds["Random Forest"]
+def main():
+    print("=" * 80)
+    print(" " * 20 + "SPY ML TRADING STRATEGY")
+    print(" " * 15 + "Multi-Model Comparison & Analysis")
+    print("=" * 80)
 
-    #building signal wiht the same optimal threshold
-    wf_signals = predictions_to_signals(
-        rf_wf_pred,
-        threshold_quantile=best_threshold
-    )
+    #1. Load Data
+    print("\n" + "="*80)
+    print("STEP 1: DATA LOADING")
+    print("="*80)
+    
+    START_DATE = "2015-01-01"
+    END_DATE   = "2024-01-01"
+    
+    print(f"Period: {START_DATE} to {END_DATE}")
+    print("Loading SPY, VIX, and Risk-Free Rate...")
 
-    #backtest walk-forward on the same period 
-    wf_bt = backtest_signals(
-        returns=y_reg.loc[rf_wf_pred.index],
-        signals=wf_signals,
-        trading_cost_bps=1.0,
-        starting_capital=1.0,
-    )
+    spy = get_single_ticker("SPY", START_DATE, END_DATE)
+    vix = get_vix(START_DATE, END_DATE)
+    rf  = get_risk_free_rate(START_DATE, END_DATE)
+    
+    print(f"SPY data loaded: {len(spy)} rows")
+    print(f"VIX data loaded: {len(vix)} rows")
+    print(f"RF data loaded: {len(rf)} rows")
 
-    wf_equity = (1 + wf_bt.strategy_returns).cumprod()
+    #2. Feature Engineering
+    print("\n" + "="*80)
+    print("STEP 2: FEATURE ENGINEERING")
+    print("="*80)
+    
+    fe = FeatureEngineer()
+    df = fe.create_all_features(spy, vix=vix, rf=rf)
+    
+    X, y_reg, _ = prepare_model_data(df, fe)
+    
+    print(f"\n Features created:")
+    print(f"  - Total samples: {len(X)}")
+    print(f"  - Number of features: {X.shape[1]}")
+    print(f"  - Feature names: {list(X.columns[:5])}... (showing first 5)")
 
-    #stats walk forward
-    ret_wf = wf_bt.strategy_returns
-    if ret_wf.std() > 0:
-        wf_sharpe = (ret_wf.mean() / ret_wf.std()) * np.sqrt(252)
-    else:
-        wf_sharpe = 0.0
+    #3. Tain/Test Split
+    print("\n" + "="*80)
+    print("STEP 3: TRAIN/TEST SPLIT")
+    print("="*80)
+    
+    split_date = "2020-01-01"
+    X_train = X.loc[:split_date]
+    X_test = X.loc[split_date:]
+    y_train = y_reg.loc[X_train.index]
+    y_test = y_reg.loc[X_test.index]
 
-    wf_total_return = (wf_equity.iloc[-1] - 1) * 100
-    running_max_wf = wf_equity.expanding().max()
-    dd_wf = (wf_equity - running_max_wf) / running_max_wf
-    wf_max_dd = dd_wf.min() * 100
-    wf_time_in_mkt = wf_signals.mean() * 100
+    print(f"Split date: {split_date}")
+    print(f"Train period: {X_train.index[0].date()} to {X_train.index[-1].date()}")
+    print(f"Test period:  {X_test.index[0].date()} to {X_test.index[-1].date()}")
+    print(f"Train samples: {len(X_train)} ({len(X_train)/len(X)*100:.1f}%)")
+    print(f"Test samples:  {len(X_test)} ({len(X_test)/len(X)*100:.1f}%)")
 
-    print("\nWalk-forward RF performance:")
-    print(f"  Total Return: {wf_total_return:.2f}%")
-    print(f"  Sharpe Ratio: {wf_sharpe:.3f}")
-    print(f"  Max Drawdown: {wf_max_dd:.2f}%")
-    print(f"  Time in Market: {wf_time_in_mkt:.1f}%")
+    #4. Train multiple model 
+    print("\n" + "="*80)
+    print("STEP 4: TRAINING & EVALUATING MODELS")
+    print("="*80)
+    
+    models = {
+        "Random Forest": make_random_forest(n_estimators=300, max_depth=10, random_state=42),
+        "XGBoost": make_xgboost(n_estimators=400, max_depth=5, learning_rate=0.05, random_state=42),
+        "LightGBM": make_lightgbm(n_estimators=400, num_leaves=31, learning_rate=0.05, random_state=42)
+    }
+    
+    results = {}
+    for name, model in models.items():
+        print(f"\n Training {name}...")
+        results[name] = evaluate_model(model, X_train, X_test, y_train, y_test, threshold=0.4)
+        print(f" Complete | Return: {results[name]['total_return']:.2f}% | Sharpe: {results[name]['sharpe']:.3f}")
 
-    #buy and hold allign on the same period
-    bh_equity_wf = (1 + y_reg.loc[rf_wf_pred.index]).cumprod()
+    #5. Buy & Hold benchmark
+    print("\n Calculating Buy & Hold benchmark...")
+    bh_equity = (1 + y_test).cumprod()
+    bh_return = (bh_equity.iloc[-1] - 1) * 100
+    bh_sharpe = (y_test.mean() / y_test.std()) * np.sqrt(252)
+    
+    bh_running_max = bh_equity.expanding().max()
+    bh_drawdown = (bh_equity - bh_running_max) / bh_running_max
+    bh_max_dd = bh_drawdown.min() * 100
+    
+    results["Buy & Hold"] = {
+        'equity': bh_equity,
+        'total_return': bh_return,
+        'sharpe': bh_sharpe,
+        'max_drawdown': bh_max_dd,
+        'time_in_market': 100.0,
+        'num_trades': 0,
+        'ic': np.nan,
+        'ic_pval': np.nan
+    }
+    print(f" Complete | Return: {bh_return:.2f}% | Sharpe: {bh_sharpe:.3f}")
 
-    #compare with RF (fix split)
-    rf_fixed_pred = models_results["Random Forest"]["pred"]
-    rf_fixed_signals = predictions_to_signals(
-        rf_fixed_pred,
-        threshold_quantile=best_threshold
-    )
-    rf_fixed_bt = backtest_signals(
-        returns=y_test_reg,   #fix test period
-        signals=rf_fixed_signals,
-        trading_cost_bps=1.0,
-        starting_capital=1.0,
-    )
-    rf_fixed_equity = (1 + rf_fixed_bt.strategy_returns).cumprod()
+    #6. Performance comparison
+    print("\n" + "="*80)
+    print("STEP 5: PERFORMANCE COMPARISON")
+    print("="*80)
+    
+    comparison_df = pd.DataFrame({
+        'Strategy': list(results.keys()),
+        'Total Return (%)': [r['total_return'] for r in results.values()],
+        'Sharpe Ratio': [r['sharpe'] for r in results.values()],
+        'Max Drawdown (%)': [r['max_drawdown'] for r in results.values()],
+        'IC (test)': [r.get('ic', np.nan) for r in results.values()],
+        'IC p-value': [r.get('ic_pval', np.nan) for r in results.values()],
+        'Time in Market (%)': [r['time_in_market'] for r in results.values()],
+        'Num Trades': [r['num_trades'] for r in results.values()]
+    })
+    
+    print("\n" + comparison_df.to_string(index=False))
 
-    #plot 3 curves : RF walk-forward, fix RF , Buy & Hold
-    plt.figure(figsize=(12, 6))
-    plt.plot(wf_equity.index, wf_equity.values, label="RF Walk-forward")
-    plt.plot(rf_fixed_equity.index, rf_fixed_equity.values, label="RF split fixe (post-2020)")
-    plt.plot(bh_equity_wf.index, bh_equity_wf.values, "--", label="Buy & Hold")
+    #7. Best model identification
+    print("\n" + "="*80)
+    print("STEP 6: BEST MODEL ANALYSIS")
+    print("="*80)
+    
+    # Exclude Buy & Hold from ranking
+    ml_models = comparison_df[comparison_df['Strategy'] != 'Buy & Hold'].copy()
+    
+    # Best by Sharpe
+    best_sharpe_idx = ml_models['Sharpe Ratio'].idxmax()
+    best_sharpe = ml_models.loc[best_sharpe_idx, 'Strategy']
+    
+    # Best by Return
+    best_return_idx = ml_models['Total Return (%)'].idxmax()
+    best_return = ml_models.loc[best_return_idx, 'Strategy']
+    
+    # Best by IC
+    best_ic_idx = ml_models['IC (test)'].idxmax()
+    best_ic = ml_models.loc[best_ic_idx, 'Strategy']
+    
+    print(f"\n RANKINGS:")
+    print(f"  Best Sharpe Ratio:      {best_sharpe} ({ml_models.loc[best_sharpe_idx, 'Sharpe Ratio']:.3f})")
+    print(f"  Best Total Return:      {best_return} ({ml_models.loc[best_return_idx, 'Total Return (%)']:.2f}%)")
+    print(f"  Best IC (predictive):   {best_ic} ({ml_models.loc[best_ic_idx, 'IC (test)']:.4f})")
+    
+    # Overall winner (by Sharpe - most important metric)
+    print(f"\nOVERALL WINNER: {best_sharpe}")
+    print(f"Reason: Highest risk-adjusted returns (Sharpe Ratio)")
+    
+    # Outperformance vs Buy & Hold
+    bh_return_val = comparison_df[comparison_df['Strategy'] == 'Buy & Hold']['Total Return (%)'].values[0]
+    winner_return = ml_models.loc[best_sharpe_idx, 'Total Return (%)']
+    outperformance = winner_return - bh_return_val
+    
+    print(f"\nvs Buy & Hold:")
+    print(f"   {best_sharpe}: {winner_return:.2f}%")
+    print(f"   Buy & Hold: {bh_return_val:.2f}%")
+    print(f"   Outperformance: {outperformance:+.2f}%")
 
-    plt.title("Equity curves – RF Walk-forward vs RF fix split vs Buy & Hold")
-    plt.xlabel("Date")
-    plt.ylabel("Equity (normalized)")
-    plt.legend()
-    plt.grid(True)
+    #8. Visualization
+    print("\n" + "="*80)
+    print("STEP 7: GENERATING VISUALIZATION")
+    print("="*80)
+    
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10))
+
+    colors = {'Random Forest': '#2E86AB', 'XGBoost': '#A23B72', 
+              'LightGBM': '#F18F01', 'Buy & Hold': '#C73E1D'}
+    
+    for name, res in results.items():
+        axes[0].plot(res['equity'].index, res['equity'].values, 
+                    label=name, linewidth=2, color=colors.get(name, 'gray'))
+    
+    axes[0].set_title('Equity Curves Comparison (2020-2024)', 
+                     fontsize=14, fontweight='bold')
+    axes[0].set_ylabel('Equity (Starting Capital = $1)', fontsize=11)
+    axes[0].legend(loc='upper left', fontsize=10)
+    axes[0].grid(True, alpha=0.3)
+    
+    for name, res in results.items():
+        if name == 'Buy & Hold':
+            dd = bh_drawdown * 100
+        else:
+            equity = res['equity']
+            running_max = equity.expanding().max()
+            dd = (equity - running_max) / running_max * 100
+        
+        axes[1].plot(dd.index, dd.values, label=name, 
+                    linewidth=2, color=colors.get(name, 'gray'), alpha=0.4)
+    
+    axes[1].set_title('Drawdown Comparison', fontsize=14, fontweight='bold')
+    axes[1].set_ylabel('Drawdown (%)', fontsize=11)
+    axes[1].set_xlabel('Date', fontsize=11)
+    axes[1].legend(loc='lower left', fontsize=10)
+    axes[1].grid(True, alpha=0.3)
+    axes[1].axhline(y=0, color='black', linestyle='-', linewidth=0.8)
+    
     plt.tight_layout()
-
-    #save the graphic 
-    plt.savefig("equity_walkforward_rf.png", dpi=300)
-    plt.close()
-
-    print("\nSaved walk-forward comparison plot as: equity_walkforward_rf.png")   
-
-#graphic 
-    stochastic_cols = fe.get_stochastic_feature_names()
-
-    X_train_baseline = X_train.drop(columns=stochastic_cols, errors="ignore")
-    X_test_baseline  = X_test.drop(columns=stochastic_cols,  errors="ignore")
-
-    #random forest without stochastic feature
-    rf_baseline = make_random_forest(
-        n_estimators=300,
-        max_depth=10,
-        min_samples_leaf=5,
-        random_state=42
-    )
-    rf_baseline.fit(X_train_baseline, y_train_reg)
-
-    pred_rf_base = pd.Series(
-        rf_baseline.predict(X_test_baseline),
-        index=y_test_reg.index,
-        name="rf_base_pred"
-    )
-    signals_base = predictions_to_signals(
-        pred_rf_base,
-        threshold_quantile=best_threshold
-    )
-
-    bt_base = backtest_signals(
-        returns=y_test_reg,
-        signals=signals_base,
-        trading_cost_bps=1.0,
-        starting_capital=1.0
-    )
-
-    #random forest with stochastics features
-    rf_stoch = models["Random Forest"]
-    pred_rf_stoch = models_results["Random Forest"]["pred"]
-    signals_stoch = predictions_to_signals(
-        pred_rf_stoch,
-        threshold_quantile=best_threshold
-    )
-
-    bt_stoch = backtest_signals(
-        returns=y_test_reg,
-        signals=signals_stoch,
-        trading_cost_bps=1.0,
-        starting_capital=1.0
-    )
-
-    #buy & hold
-    bh_equity = (1 + y_test_reg).cumprod()
-    bh_equity.name = "Buy & Hold"
-
-    #plot 
-    plt.figure(figsize=(12, 6))
-    plt.plot(bt_base.equity_curve,  label=f"RF baseline (thr={best_threshold:.0%})")
-    plt.plot(bt_stoch.equity_curve, label=f"RF + stochastic (thr={best_threshold:.0%})")
-    plt.plot(bh_equity.index, bh_equity.values, "--", label="Buy & Hold")
-
-    plt.title("Equity curves – RF baseline vs RF + stochastic vs Buy & Hold")
-    plt.xlabel("Date")
-    plt.ylabel("Equity (normalized)")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig("equity_comparison.png", dpi=300)
-    plt.close()
-    print("\nPlot saved as: equity_comparison.png")
+    plt.savefig('model_comparison.png', dpi=150, bbox_inches='tight')
+    print("Chart saved as 'model_comparison.png'")
+    
+    #9. Final summary
+    print("\n" + "="*80)
+    print("PIPELINE EXECUTION SUMMARY")
+    print("="*80)
+    print(f"Data loaded: {START_DATE} to {END_DATE}")
+    print(f"Features engineered: {X.shape[1]} features")
+    print(f"Models trained: {len(models)} ML models")
+    print(f"Best model: {best_sharpe} (Sharpe: {ml_models.loc[best_sharpe_idx, 'Sharpe Ratio']:.3f})")
+    print(f"Outperformance: {outperformance:+.2f}% vs Buy & Hold")
+    print(f"Visualization saved: model_comparison.png")
+    print("\n" + "="*80)
+    print("PIPELINE EXECUTED SUCCESSFULLY")
+    print("="*80)
 
 
 if __name__ == "__main__":
     main()
-
-
