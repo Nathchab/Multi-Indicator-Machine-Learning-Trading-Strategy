@@ -6,7 +6,7 @@ from typing import Iterable
 import pandas as pd
 import yfinance as yf
 
-
+#Centralized raw data directory to ensure reproducibility and avoid re-downloading identical datasets
 DATA_DIR = Path("data") / "raw"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -14,6 +14,7 @@ def _ticker_to_filename(ticker: str, interval: str) -> Path:
     """Convert a ticker and interval to a standardized filename."""
     return DATA_DIR / f"{ticker}_{interval}.csv"
 
+#Restricting data source simplifies data consistency and avoids handling heterogeneous provider formats
 def download_prices(
     tickers: Iterable[str],
     start: str,
@@ -56,42 +57,45 @@ def download_prices(
         
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
-        
-        df.columns = [str(col).lower().replace(' ', '_') for col in df.columns]
+
+        #Column names are normalized to ensure a consistent schema across tickers and simplify downstream processing
+        df.columns = [str(col).lower().replace(" ", "_") for col in df.columns]
         
         df = df.reset_index()
         
-        date_col = [col for col in df.columns if 'date' in col.lower()][0]
-        df = df.rename(columns={date_col: 'date'})
+        date_col = [col for col in df.columns if "date" in col.lower()][0]
+        df = df.rename(columns={date_col: "date"})
         
-        df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None)
+        df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
         
-        df['ticker'] = ticker
+        df["ticker"] = ticker
         
-        df = df.drop_duplicates(subset=['ticker', 'date'], keep='first')
+        df = df.drop_duplicates(subset=["ticker", "date"], keep="first")
         
         all_data.append(df)
-        
+        #Local caching reduces network calls and guarantees identical data across multiple runs
         if cache:
             filepath = _ticker_to_filename(ticker, interval)
             df.to_csv(filepath, index=False)
-            print(f"✓ Data for {ticker} cached at {filepath}.")
+            print(f" Data for {ticker} cached at {filepath}.")
     
     if not all_data:
         raise ValueError("No data was fetched for the provided tickers.")
     
     data = pd.concat(all_data, ignore_index=True)
     
-    data['date'] = pd.to_datetime(data['date'])
+    data["date"] = pd.to_datetime(data["date"])
     
+    #Duplicate (ticker, date) rows are removed to ensure a well-defined time series for each asset
     n_before = len(data)
-    data = data.drop_duplicates(subset=['ticker', 'date'], keep='first')
+    data = data.drop_duplicates(subset=["ticker", "date"], keep="first")
     n_after = len(data)
     
     if n_before != n_after:
         print(f"Removed {n_before - n_after} duplicate rows")
 
-    data = data.set_index(['ticker', 'date']).sort_index()
+    #MultiIndex enables scalable handling of multiple assets while preserving time-series structure
+    data = data.set_index(["ticker", "date"]).sort_index()
     
     return data
 
@@ -109,6 +113,7 @@ def load_cached_prices(
         if not filepath.exists():
             raise FileNotFoundError(f"Cached data for {ticker} not found at {filepath}.")
         
+        #Dates are parsed explicitly to preserve time-based indexing and avoid silent type issues
         df = pd.read_csv(filepath, parse_dates=["date"]) 
         all_data.append(df)
     
@@ -134,11 +139,13 @@ def get_prices(
             data_start = data.index.get_level_values('date').min()
             data_end = data.index.get_level_values('date').max()
             
+            #Cached data is only used if it fully covers the requested period to prevent partial or inconsistent datasets
             if data_start <= pd.Timestamp(start) and data_end >= pd.Timestamp(end):
-                print("✓ Loaded from cache successfully.")
+                print(" Loaded from cache successfully.")
                 return data.loc[(slice(None), slice(start, end)), :]
             else:
                 print("Cached data doesn't cover requested period. Downloading...")
+        #Graceful fallback ensures robustness when cache is missing        
         except FileNotFoundError:
             print("Cache not found. Downloading...")
     
@@ -156,6 +163,7 @@ def get_single_ticker(
     Convenience function to get data for a single ticker.
     Returns a DataFrame with single index (date).
     """
+    #Cross-section simplifies downstream feature engineering by returning a single time-indexed DataFrame
     data = get_prices([ticker], start, end, interval, use_cache)
     return data.xs(ticker, level='ticker')
 
@@ -167,7 +175,8 @@ def get_vix(start: str, end: str, use_cache: bool = True)-> pd.Series:
         pd.Series with date index
     """
     data = get_single_ticker("^VIX", start, end, use_cache=use_cache)
-    
+
+    #Explicit naming allows seamless integration with feature engineering pipelines
     if isinstance(data, pd.DataFrame):
         if "close" in data.columns:
             vix_series = data["close"]
@@ -196,6 +205,7 @@ def get_risk_free_rate(start: str, end: str, use_cache: bool = True) -> pd.Serie
     else:
         rf_series = data
     
+    #Rates are converted from percentage to decimal form to ensure correct excess return computations
     rf_series = rf_series / 100
     rf_series.name = "rf"
     

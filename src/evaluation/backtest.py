@@ -4,6 +4,7 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
+#Standard assumption for annualizing daily financial returns
 TRADING_DAYS_PER_YEARS = 252
 
 @dataclass
@@ -18,6 +19,7 @@ def _compute_equity_curve(returns : pd.Series, starting_capital : float = 1.0)->
     """
     Compute equity curve from simple returns
     """
+    #Missing returns are treated as flat periods to preserve continuity of the equity curve
     returns = returns.fillna(0.0)
     equity = (1.0 + returns).cumprod() * starting_capital
     return equity
@@ -27,6 +29,7 @@ def _compute_performance_stats(returns: pd.Series, freq : int = TRADING_DAYS_PER
     Compute basic perfomance statistics
     """
     returns = returns.dropna()
+    #Graceful handling of empty return series avoids silent failures in downstream evaluation
     if returns.empty:
         return {
             "total_return" : np.nan,
@@ -43,10 +46,12 @@ def _compute_performance_stats(returns: pd.Series, freq : int = TRADING_DAYS_PER
     mean_ret = returns.mean()
     vol = returns.std()
 
-    annual_return = (1+ mean_ret) ** freq - 1 if mean_ret is not None else np.nan
+    #Returns and volatility are annualized to make results comparable across strategies and time horizons
+    annual_return = (1 + mean_ret) ** freq - 1 if mean_ret is not None else np.nan
     annual_vol = vol * np.sqrt(freq) if vol is not None else np.nan
     sharpe = annual_return / annual_vol if (annual_vol is not None and annual_vol != 0) else np.nan
 
+    #Maximum drawdown captures worst peak-to-trough loss, a key risk metric for trading strategies
     equity = _compute_equity_curve(returns)
     rolling_max = equity.cummax()
     drawdown = (equity/rolling_max) - 1.0
@@ -77,16 +82,20 @@ def backtest_signals(returns : pd.Series, signals : pd.Series, trading_cost_bps 
     """
     Backtest a strategy defined by position signals
     """
+    #Signals and returns are aligned on common timestamps to avoid implicit look-ahead or misalignment bias
     data = pd.concat({"returns" : returns, "signal" : signals}, axis=1).dropna()
     if data.empty:
         raise ValueError("No overlapping data between returns and signals")
     position = data["signal"].astype(float)
     position_prev = position.shift(1).fillna(0.0)
+    #Turnover measures position changes and directly drives transaction costs
     turnover = (position - position_prev).abs()
 
+    #Trading costs are expressed in basis points and converted to decimal rates
     cost_rate = trading_cost_bps / 1e4
     trading_costs = turnover * cost_rate
 
+    #Strategy returns account for both market exposure and trading frictions
     strat_returns = position * data["returns"] - trading_costs
 
     benchmark_returns = data["returns"].copy()

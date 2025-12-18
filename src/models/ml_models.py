@@ -57,6 +57,8 @@ def make_random_forest(
     min_samples_leaf: int = 5,
     random_state: int = 42,
 )-> MLModelWrapper:
+    #Minimum leaf size is increased to reduce overfitting in noisy financial data
+
     """
     Create random forest model wrapper
     """
@@ -122,7 +124,7 @@ if __name__ == "__main__":
     
     rf = make_random_forest()
     rf.fit(X, y)
-    print(f"RandomForest R²: {rf.score(X, y):.4f}")
+    print(f"RandomForest R-squared: {rf.score(X, y):.4f}")
     print(f"Feature importance:\n{rf.get_feature_importance()}")
     
     print("\nML models module working!")

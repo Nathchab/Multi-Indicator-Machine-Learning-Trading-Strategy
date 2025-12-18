@@ -18,8 +18,9 @@ def walk_forward_backtest(
     - Rolling test window (e.g., 20 days)
     - Model retrained at each iteration
     - Returns concatenated predictions for each model
+    - This setup mimics a realistic live trading scenario, where models are periodically retrained on expanding information.
     """
-
+    #Store out-of-sample strategy returns for each rolling test window to reconstruct a continuous equity curve
     n = len(X)
     all_strategy_returns = {name: [] for name in models.keys()}
 
@@ -32,6 +33,7 @@ def walk_forward_backtest(
         print(f" WALK-FORWARD BACKTEST ({train_window}d train / {test_window}d test)")
         print("============================================")
 
+    #Iteratively move the training and testing windows forward to avoid any look-ahead bias
     while end_test <= n:
 
         #Rolling windows
@@ -50,6 +52,7 @@ def walk_forward_backtest(
             pred = model.predict(X_test)
             pred = pd.Series(pred, index=X_test.index)
 
+            #Using a quantile-based threshold ensures a stable exposure level and avoids dependence on absolute prediction magnitudes
             threshold_value = pred.quantile(signal_threshold)
             signals = (pred > threshold_value).astype(int)
 
@@ -64,12 +67,12 @@ def walk_forward_backtest(
 
             all_strategy_returns[name].append(bt.strategy_returns)
 
-        #Roll the windows
+        #Windows are advanced by the test size to maintain a non-overlapping out-of-sample evaluation
         start += test_window
         end_train += test_window
         end_test += test_window
 
-    #Concatenate all predictions
+    #Concatenate all out-of-sample returns to form a single time series per model
     final_returns = {
     name: pd.concat(ret_list).sort_index()
     for name, ret_list in all_strategy_returns.items()

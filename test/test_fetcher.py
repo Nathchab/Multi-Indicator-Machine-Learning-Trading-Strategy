@@ -1,3 +1,8 @@
+import sys
+from pathlib import Path
+
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 from src.data.fetcher import get_market_data, get_single_ticker
 
 def test_basic_fetch():
@@ -7,9 +12,9 @@ def test_basic_fetch():
     print("=" * 50)
     
     spy = get_single_ticker('SPY', '2020-01-01', '2024-01-01')
-    print(f"\n✓ SPY data shape: {spy.shape}")
-    print(f"✓ Date range: {spy.index.min()} to {spy.index.max()}")
-    print(f"✓ Columns: {spy.columns.tolist()}")
+    print(f"\n SPY data shape: {spy.shape}")
+    print(f" Date range: {spy.index.min()} to {spy.index.max()}")
+    print(f" Columns: {spy.columns.tolist()}")
     print(f"\nFirst few rows:\n{spy.head()}")
     
     print("\n" + "=" * 50)

@@ -8,6 +8,7 @@ from statsmodels.regression.linear_model import RegressionResultsWrapper
 from typing import Tuple, List, Optional, Dict
 import warnings
 
+#Linear baseline model used as a transparent reference point to evaluate whether more complex ML models add value
 class OLSModel:
     """
     OLS baseline model for predicting returns 
@@ -41,6 +42,7 @@ class OLSModel:
         self.features_names = X.columns.tolist()
         X_work = X.copy()
 
+        #Optional standardization ensures coefficient comparability when features have different scales
         if standardize:
             self.X_train_mean = X_work.mean()
             self.X_train_std = X_work.std()
@@ -51,12 +53,13 @@ class OLSModel:
         
         if add_constant:
             X_work = sm.add_constant(X_work)
-        self.model = sm.OLS(y, X_work, missing='drop')
+        self.model = sm.OLS(y, X_work, missing="drop")
 
+        #HAC standard errors are enabled by default to account for heteroskedasticity and autocorrelation in financial returns
         if self.use_hac:
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore")
-                self.results = self.model.fit(cov_type='HAC', cov_kwds={'maxlags': self.maxlags})
+                self.results = self.model.fit(cov_type="HAC", cov_kwds={"maxlags": self.maxlags})
         
         else:
             self.results = self.model.fit()
@@ -70,11 +73,14 @@ class OLSModel:
         """
         if self.results is None:
             raise ValueError("Model must be fitted before making predictions'.")
+
+        #Test data is transformed using training statistics to preserve out-of-sample consistency
         if self.X_train_mean is not None:
             X_transformed = (X - self.X_train_mean) / self.X_train_std
         else:
             X_transformed = X.copy()
         
+        #Intercept is included to avoid forcing the regression through the origin
         if add_constant:
             X_transformed = sm.add_constant(X_transformed)
         return self.results.predict(X_transformed)
@@ -106,11 +112,13 @@ class OLSModel:
         """
         if self.results is None:
             raise ValueError("Model must be fitted first")
+
+        #Feature selection is based on classical hypothesis testing rather than predictive optimization
         pvalues = self.results.pvalues
         significant = pvalues[pvalues < alpha].index.tolist()
 
-        if 'const' in significant:
-            significant.remove('const')
+        if "const" in significant:
+            significant.remove("const")
         return significant
 
     def get_coefficients(self) -> pd.DataFrame:
@@ -138,6 +146,7 @@ class OLSModel:
         if self.results is None: 
             raise ValueError("Model must be fitted first")
         
+        #Diagnostics summarize model fit and numerical stability to detect misspecification or multicollinearity
         diagnostics = {
             "r_squared" : self.results.rsquared,
             "adj_r_squared" : self.results.rsquared_adj,
@@ -178,6 +187,7 @@ class RollingOLS:
         print(f"Running rolling OLS with window={self.window}...")
         print(f"Total periods : {len(X)}, Training starts at periods {self.window}")
 
+        #Model is re-estimated at each step using only past data to mimic a realistic forecasting setup
         for i in range (self.window, len(X)):
             if i % 100 == 0:
                 print(f"Processing period {i}/{len(X)}...")
@@ -249,6 +259,8 @@ class FeatureSelector:
         """
         from statsmodels.stats.outliers_influence import variance_inflation_factor
         selected = X.columns.tolist()
+
+        #Iteratively removes the most collinear feature until all remaining predictors satisfy the VIF threshold
         while True:
             X_subset = X[selected]
             vif_data = pd.DataFrame({"feature" : selected, "VIF" : [variance_inflation_factor(X_subset.value, i)]})
@@ -267,18 +279,18 @@ if __name__ == "__main__":
     
     np.random.seed(42)
     n = 1000
-    dates = pd.date_range('2020-01-01', periods=n, freq='D')
+    dates = pd.date_range("2020-01-01", periods=n, freq="D")
     
     X = pd.DataFrame({
-        'momentum': np.random.randn(n),
-        'volatility': np.random.randn(n),
-        'rsi': np.random.randn(n)
+        "momentum": np.random.randn(n),
+        "volatility": np.random.randn(n),
+        "rsi": np.random.randn(n)
     }, index=dates)
     
     y = pd.Series(
-        0.1 * X['momentum'] - 0.05 * X['volatility'] + np.random.randn(n) * 0.02,
+        0.1 * X["momentum"] - 0.05 * X["volatility"] + np.random.randn(n) * 0.02,
         index=dates,
-        name='returns'
+        name="returns"
     )
     
     model = OLSModel(use_hac=True)
@@ -298,4 +310,4 @@ if __name__ == "__main__":
     predictions = model.predict(X.head(10))
     print(f"\nFirst 10 predictions: {predictions}")
     
-    print("\n✓ OLS Model test completed successfully!")
+    print("\nOLS Model test completed successfully!")

@@ -22,6 +22,7 @@ class FeatureEngineer:
     ) -> pd.DataFrame:
         """Add return features to the DataFrame."""
         df = df.copy()
+        #Returns are lagged to ensure only information available at time t is used for predicting t+1 returns (prevent look-ahead bias)
         for period in periods:
             ret = df["close"].pct_change(period)
             df[f"return_{period}d"] = ret.shift(1)
@@ -43,6 +44,7 @@ class FeatureEngineer:
             List of window sizes
         """
         df = df.copy()
+        #Price-to-SMA ratio is used instead of raw SMA values to provide a scale-invariant momentum signal
         for window in windows:
             sma = df["close"].rolling(window).mean()
             df[f"sma_{window}d"] = sma.shift(1)
@@ -75,6 +77,7 @@ class FeatureEngineer:
             df["return_1d_temp"] = df["close"].pct_change()
             return_col = "return_1d_temp"
         
+        #Annualized realized volatility is used to capture recent risk levels which are known to affect return dynamics
         vol = df[return_col].rolling(window).std() * np.sqrt(252)
         df[f"volatility_{window}d"] = vol.shift(1)
         hl_range = (df['high'] - df['low']) / df['close']
@@ -136,7 +139,7 @@ class FeatureEngineer:
             
         vol_ma = df['volume'].rolling(window).mean()
         df[f'volume_ma_{window}'] = vol_ma.shift(1)
-        
+        #Volume ratio highlights abnormal trading activity relative to recent average volum
         df[f'volume_ratio_{window}'] = (df['volume'] / vol_ma).shift(1)
         
         return df
@@ -172,8 +175,10 @@ class FeatureEngineer:
         return df
 
     def create_stochastic_feature(self, df: pd.DataFrame)-> pd.DataFrame:
-        """create features based on stochastic calculus (GBM framework)
         """
+        create features based on stochastic calculus (GBM framework)
+        """
+        #These features are inspired by a Geometric Brownian Motion framework to separate drift and diffusion components of price dynamics
         result = df.copy()
 
         log_returns = np.log(df["close"] / df["close"].shift(1))
@@ -186,6 +191,7 @@ class FeatureEngineer:
         result["sigma_60d"] = log_returns.rolling(60).std() * np.sqrt(252)
         result["sigma_120d"] = log_returns.rolling(120).std() * np.sqrt(252)
 
+        #Drift-to-volatility ratio approximates a risk-adjusted trend signal
         result["drift_vol_ratio_20d"] = result["drift_20d"] / (result["sigma_20d"] + 1e-8)
         result["drift_vol_ratio_60d"] = result["drift_60d"] / (result["sigma_60d"] + 1e-8)
         
@@ -227,6 +233,7 @@ class FeatureEngineer:
             Risk-free rate data (with date index)
         """
         print("Creating features...")
+        #Feature construction follows a fixed sequence to ensure consistency and reproducibility across experiments
         df = self.add_returns(df)
         print("Returns added")
         
@@ -241,16 +248,18 @@ class FeatureEngineer:
         
         df = self.add_volume_features(df)
         print("Volume features added")
-
+        
+        #VIX is joined to incorporate market-wide risk sentiment beyond asset-specific information
         if vix is not None:
-                df = df.join(vix, how='left')
-                df['vix_change'] = df['vix'].pct_change().shift(1)
+                df = df.join(vix, how="left")
+                df["vix_change"] = df["vix"].pct_change().shift(1)
                 print("VIX added")
         
+        #Excess returns are computed to isolate risk premia from the risk-free component
         if rf is not None:
-            df = df.join(rf, how='left')
-            if 'return_1d' in df.columns:
-                df['excess_return_1d'] = df['return_1d'] - (df['rf'] / 252)
+            df = df.join(rf, how="left")
+            if "return_1d" in df.columns:
+                df["excess_return_1d"] = df["return_1d"] - (df["rf"] / 252)
             print("Risk-free rate added")
 
         if include_stochastic:
@@ -267,8 +276,8 @@ class FeatureEngineer:
         df : pd.DataFrame
             DataFrame with features
         """
-        exclude = ['open', 'high', 'low', 'close', 'volume', 'adj_close']
-        exclude += [col for col in df.columns if col.startswith('target_')]
+        exclude = ["open", "high", "low", "close", "volume", "adj_close"]
+        exclude += [col for col in df.columns if col.startswith("target_")]
 
         features = [col for col in df.columns if col not in exclude]
         
@@ -279,15 +288,16 @@ class FeatureEngineer:
         Check for potential data leakage.
         """
         diagnostics = {}
-        if 'target_return_1d' in df.columns:
+        if "target_return_1d" in df.columns:
             features = self.get_feature_names(df)
         
-        correlations = df[features+['target_return_1d']].corr()['target_return_1d'].drop('target_return_1d')
+        #High correlations with the target may indicate unintended information leakage
+        correlations = df[features+["target_return_1d"]].corr()["target_return_1d"].drop("target_return_1d")
         suspicious = correlations[correlations.abs() > 0.9]
         
-        diagnostics['max_correlation'] = correlations.abs().max()
-        diagnostics['suspicious_features'] = suspicious.to_dict()
-        diagnostics['has_leakage'] = len(suspicious) > 0 
+        diagnostics["max_correlation"] = correlations.abs().max()
+        diagnostics["suspicious_features"] = suspicious.to_dict()
+        diagnostics["has_leakage"] = len(suspicious) > 0 
         return diagnostics
     
 def prepare_model_data(
@@ -309,9 +319,10 @@ def prepare_model_data(
     feature_names = feature_engineer.get_feature_names(df)
 
     X = df[feature_names].copy()
-    y_reg = df['target_return_1d'].copy()
-    y_clf = df['target_direction_1d'].copy()
+    y_reg = df["target_return_1d"].copy()
+    y_clf = df["target_direction_1d"].copy()
 
+    #Only fully observable samples are kept to ensure clean model training and evaluation
     if dropna:
         valid_idx = X.notna().all(axis=1) & y_reg.notna()
         
@@ -334,13 +345,21 @@ def prepare_model_data(
 
     return X, y_reg, y_clf
 
+#Simple sanity check to validate feature construction and detect obvious data leakage issues
 if __name__ == "__main__":
+
+    import sys
+    import os
+
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
 
     from src.data.fetcher import get_single_ticker
     
     print("Testing FeatureEngineer...")
     
-    spy = get_single_ticker('SPY', '2020-01-01', '2024-01-01')
+    spy = get_single_ticker("SPY", "2020-01-01", "2024-01-01")
     
     engineer = FeatureEngineer()
     features_df = engineer.create_all_features(spy)
@@ -349,10 +368,10 @@ if __name__ == "__main__":
     print(f"Date range: {features_df.index.min()} to {features_df.index.max()}")
     
     diagnostics = engineer.check_for_leakage(features_df)
-    print(f"\nMax correlation with target: {diagnostics['max_correlation']:.3f}")
-    if diagnostics['has_leakage']:
+    print(f"\nMax correlation with target: {diagnostics["max_correlation"]:.3f}")
+    if diagnostics["has_leakage"]:
         print("WARNING: Potential data leakage detected!")
-        print(diagnostics['suspicious_features'])
+        print(diagnostics["suspicious_features"])
     else:
         print("No obvious data leakage detected")
 
