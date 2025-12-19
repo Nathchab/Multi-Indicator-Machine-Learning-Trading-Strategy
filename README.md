@@ -8,23 +8,6 @@ This project compares multiple ML models against a Buy & Hold baseline using out
 
 ---
 
-## Key Results
-
-| Model | Total Return | Sharpe Ratio | Max Drawdown | Time in Market |
-|-------|--------------|--------------|--------------|----------------|
-| **Random Forest** | **[56.28%]** | **[0.66]** | **[-28.74%]** | **[60%]** |
-| XGBoost | [-14.02%] | [-0.09] | [-33.56%] | [60%] |
-| LightGBM | [37.45%] | [0.51] | [-29.78%] | [60%] |
-| Buy & Hold | [46.31%] | [0.53] | [-34.10%] | 100% |
-
-** Winner:** Random Forest (highest Sharpe Ratio)
-
-**Outperformance:** +9.97% vs Buy & Hold
-
-*Results based on 2020-2024 test period with walk-forward validation.*
-
----
-
 ## Quick Start
 
 ### Prerequisites
@@ -333,7 +316,6 @@ scipy>=1.11.0
 ### Optional Dependencies
 ```
 jupyter>=1.0.0          # For notebooks
-pytest>=7.4.0           # For testing
 ```
 
 See `requirements.txt` or `environment.yml` for full list.
