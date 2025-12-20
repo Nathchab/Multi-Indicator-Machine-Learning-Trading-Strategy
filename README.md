@@ -28,6 +28,13 @@ conda activate trading-strategy
 
 # Or use pip
 pip install -r requirements.txt
+
+# Install Jupyter kernel
+python -m ipykernel install --user --name=trading-strategy --display-name="Python (Trading Strategy)"
+
+# Verify kernel installation
+jupyter kernelspec list
+
 ```
 
 ### Run the Analysis
