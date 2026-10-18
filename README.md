@@ -4,7 +4,7 @@
 
 **Can machine learning models extract predictive signals from market and macro-financial indicators ?**
 
-This project compares multiple ML models against a Buy & Hold baseline using out-of-sample backtesting with realistic transaction costs (1 basis point).
+This project compares multiple ML models against a Buy & Hold baseline using walk-forward backtesting with rolling retraining with realistic transaction costs (1 basis point).
 
 ---
 
@@ -89,12 +89,12 @@ The `notebooks/` folder contains 6 Jupyter notebooks for comprehensive analysis:
 ### 3. Threshold Optimization (`03_threshold_optimization.ipynb`)
 **Purpose:** Optimize signal generation thresholds
 
-- Test multiple threshold strategies (quantile-based, fixed, adaptive)
+- Test multiple threshold strategies (quantile-based, from 30% to 90%)
 - Sharpe Ratio optimization
 - Risk-return tradeoff analysis
 - Time-in-market vs performance
 - Sensitivity analysis
-- Optimal threshold identification
+- Threshold sensitivity (evaluated on the test period, see Known Limitations)
 
 **Key outputs:** Threshold performance curves, optimal threshold recommendation
 
@@ -115,14 +115,14 @@ The `notebooks/` folder contains 6 Jupyter notebooks for comprehensive analysis:
 ---
 
 ### 5. Walk-Forward Validation (`05_walk_forward_validation.ipynb`)
-**Purpose:** Robust out-of-sample testing with rolling windows
+**Purpose:** Walk-forward testing with rolling retraining testing with rolling windows
 
 - Rolling window backtests (500d train / 20d test)
 - Performance stability over time
 - Model retraining frequency analysis
 - Strategy comparison under different market regimes
 - Realistic transaction cost simulation (1 bps)
-- Overfitting detection
+
 
 **Key outputs:** Walk-forward equity curves, rolling performance metrics, stability analysis
 
@@ -136,7 +136,6 @@ The `notebooks/` folder contains 6 Jupyter notebooks for comprehensive analysis:
 - Assess value added by non-linear models
 - Performance attribution analysis
 - Statistical significance tests
-- Economic vs statistical significance
 
 **Key outputs :** OLS performance metrics, comparison with ML models
 
@@ -191,7 +190,7 @@ Multi-Indicator-Machine-Learning-Trading-Strategy/
 - **Asset :** SPY (S&P 500 ETF)
 - **Period :** 2015-01-01 to 2024-01-01
 - **Features :** technical + stochastic calculus indicators
-- **Sources :** Yahoo Finance (prices), FRED (VIX, risk-free rate)
+- **Sources :** Yahoo Finance (SPY, ^VIX, ^IRX as risk-free proxy)
 
 ### 2. Feature Engineering
 
@@ -212,7 +211,7 @@ Multi-Indicator-Machine-Learning-Trading-Strategy/
 ### 3. Train/Test Split
 - **Train :** 2015-01-01 to 2019-12-31 (5 years)
 - **Test :** 2020-01-01 to 2024-01-01 (4 years)
-- **Method :** Temporal split (no look-ahead bias)
+- **Method :** Temporal split 
 
 ### 4. Models Tested
 
@@ -224,8 +223,8 @@ Multi-Indicator-Machine-Learning-Trading-Strategy/
 | **OLS (Baseline)** | HAC standard errors | Linear benchmark |
 
 ### 5. Signal Generation
-- **Method :** Quantile thresholding (top 30% predictions → BUY)
-- **Alternative strategies tested :** Conservative (>5bps), VIX-adjusted
+- **Method :** Quantile thresholding predictions above the 40th percentile → BUY (≈60% time in market)
+- **Alternative strategy tested (OLS baseline)** : Conservative (>5bps)
 
 ### 6. Backtesting
 - **Transaction costs :** 1 basis point (realistic)
@@ -242,7 +241,7 @@ Multi-Indicator-Machine-Learning-Trading-Strategy/
 
 ### 8. Validation
 - **Walk-Forward :** 500-day train / 20-day test rolling windows
-- **Purpose :** Ensure results are not due to overfitting
+- **Purpose** : Evaluate stability under periodic retraining
 
 ---
 
@@ -263,12 +262,17 @@ dS = μ·S·dt + σ·S·dW
 # - Vol-of-vol spikes → Market stress
 ```
 
-**Impact :** Stochastic features improved Sharpe by **+33.29%** (see notebooks for details).
-
+**Walk-forward results (Jun 2017 – Dec 2023):** Sharpe 1.10 with stochastic features vs 0.89 without (Buy & Hold: 0.62). These figures are subject to the limitations listed below.
 ---
+## Known Limitations
+
+- **Threshold selected on the test period.** The 40% quantile was chosen in `03_threshold_optimization.ipynb` by maximising the Sharpe ratio on 2020–2023, the same period used for evaluation, and the walk-forward period (2017–2023) overlaps it. In the fixed split, only the 30% and 40% thresholds outperform Buy & Hold.
+- **Look-ahead in signal generation.** The quantile threshold is computed over all predictions of each test window, so the signal at date t depends on predictions from later dates in the same window.
+- **Unequal timing between feature sets.** Technical features are lagged by one day, stochastic features are not, so the with/without comparison gives the stochastic set one extra day of information.
+- **No significance test on strategy performance.** IC p-values are above 5% for all models (RF 0.20, LightGBM 0.09, XGBoost 0.56), and no OLS coefficient is significant at 5% (HAC standard errors).
+- **Planned fix.** Causal threshold (quantile of past predictions only), consistent lagging of all features, threshold selection nested within each training window, and a single frozen evaluation on 2024–2026 data.
 
 **Tests automatically configure PYTHONPATH** - no manual setup needed!
-
 ---
 
 ## Configuration
